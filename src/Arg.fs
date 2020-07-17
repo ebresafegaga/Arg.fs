@@ -7,6 +7,7 @@
 
 module Arg
 
+open System // for Boolean, why doesn't F# just allow bool. , int. , string. for .NET statics?
 open System.Text // for StringBuilder 
 
 type Spec = 
@@ -94,3 +95,13 @@ let usageWithString speclist errmsg =
 
 let usage speclist errmsg =
     eprintf "%s" (usageWithString speclist errmsg)
+
+// wrappers with 'a option
+let boolOpt (x : string) =
+  try Some (Boolean.Parse x) with _ -> None
+
+let intOpt (x : string) =
+  try Some (int x) with _ -> None
+
+let floatOpt x =
+  try Some (float x) with _ -> None
