@@ -261,3 +261,44 @@ let parseAndExpandArgvDynamicAux expand current argv speclist anonfun errmsg =
             else anonfun s
         with Bad m -> raise (convertError (Message m)) | Stop e -> raise (convertError e)
         incr current // advance 
+
+[<RequireQualifiedAccess>]
+module Sys =
+    let argv = System.Environment.GetCommandLineArgs ()
+
+// can use Expand here to update argv
+let parseAndExpandArgvDynamic current argv speclist anonfun errmsg =
+    parseAndExpandArgvDynamicAux true current argv speclist anonfun errmsg
+
+// current should be optional, but I'll just use the global current directly.
+let parseArgvDynamic argv speclist anonfun errmsg =
+    parseAndExpandArgvDynamicAux false current (ref argv) speclist anonfun errmsg
+
+// current problem just as above. Pun intended.
+let parseArgv argv speclist anonfun errmsg =
+    parseArgvDynamic argv (ref speclist) anonfun errmsg
+
+let parse l f msg = 
+    try 
+        parseArgv Sys.argv l f msg
+    with
+    | Bad msg -> eprintf "%s" msg; exit 2
+    | Help msg -> printf "%s" msg; exit 0
+
+
+let parseDynamic l f msg =
+    try
+        parseArgvDynamic Sys.argv l f msg
+    with
+    | Bad msg -> eprintf "%s" msg; exit 2
+    | Help msg -> printf "%s" msg; exit 0
+
+let parseExpand l f msg =
+    try
+        let argv = ref Sys.argv 
+        let spec = ref l 
+        let current = ref (!current) 
+        parseAndExpandArgvDynamic current argv spec f msg
+    with
+    | Bad msg -> eprintf "%s" msg; exit 2
+    | Help msg -> printf "%s" msg; exit 0
