@@ -10,6 +10,12 @@ module Arg
 open System // for Boolean, why doesn't F# just allow bool. , int. , string. for .NET statics?
 open System.Text // for StringBuilder 
 
+// should be exported 
+type Key = string 
+type Doc = string 
+type UsageMsg = string
+type AnonFun = string -> unit 
+
 type Spec = 
     | Unit of (unit -> unit)
     | Bool of (bool -> unit)
