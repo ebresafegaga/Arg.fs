@@ -14,6 +14,7 @@ type Spec =
     | Unit of (unit -> unit)
     | Bool of (bool -> unit)
     | Set of bool ref 
+    | Clear of bool ref
     | String of (string -> unit)
     | SetString of string ref
     | Int of (int -> unit)
@@ -29,7 +30,11 @@ type Spec =
 
 // used internally 
 
+exception Bad of string
+exception Help of string
+
 exception NotFound
+exception InvalidArgument of string // TODO: remove later and use .NET's own 
 
 type error = 
     | Unknown of string 
@@ -65,7 +70,7 @@ let printSpec buf (key, spec, doc) =
     if String.length doc > 0 then
         match spec with
         | Symbol (l, _) -> Printf.bprintf buf "  %s %s%s\n" key (makeSymlist "{" "|" "}" l) doc
-        | Unit | Bool | Set | String | SetString | Int 
+        | Unit | Bool | Set | Clear | String | SetString | Int 
         | SetInt | Float | SetFloat | Tuple | Symbol | Rest 
         | RestAll | Expand -> Printf.bprintf buf "  %s %s\n" key doc 
 
@@ -105,3 +110,154 @@ let intOpt (x : string) =
 
 let floatOpt x =
   try Some (float x) with _ -> None
+
+// not good to make a global mutable? 
+let current = ref 0
+
+//
+// meaty stuff 
+//
+
+open Printf // for bprintf and family 
+
+// read 'expand' as 'expand?'
+let parseAndExpandArgvDynamicAux expand current argv speclist anonfun errmsg =
+
+    let initpos = !current // not global 'current'; local
+
+    (* convert an internal error to a Bad/Help exception
+       *or* add the program name as a prefix and the usage message as a suffix
+       to an user-raised Bad exception.
+    *)
+    let convertError error =
+        let b = StringBuilder (200) 
+        let progname = if initpos < (Array.length !argv) then (!argv).[initpos] else "(?)"
+        
+        match error with 
+        | Unknown "-help" -> ()
+        | Unknown "--help" -> ()
+        | Unknown s ->
+          bprintf b "%s: unknown option '%s'.\n" progname s
+        | Missing s ->
+          bprintf b "%s: option '%s' needs an argument.\n" progname s
+        | Wrong (opt, arg, expected) ->
+          bprintf b "%s: wrong argument '%s'; option '%s' expects %s.\n"
+                  progname arg opt expected
+        | Message s -> (* user error message *)
+          bprintf b "%s: %s.\n" progname s
+
+        usageWithBuffer b !speclist errmsg
+        if error = Unknown "-help" || error = Unknown "--help"
+        then Help (b.ToString ())
+        else Bad (b.ToString ())
+
+    incr current // move from name of exe to real CLI arguments 
+
+    while !current < (Array.length !argv) do
+        try 
+            let s = (!argv).[!current]
+            if String.length s >= 1 && s.[0] = '-' then
+                let action, follow = 
+                    try getValue s !speclist, None
+                    with NotFound ->
+                        try
+                            let keyword, arg = split s 
+                            getValue keyword !speclist, Some arg
+                        with _ -> raise (Stop (Unknown s))
+                let noArg () =
+                    match follow with
+                    | None -> ()
+                    | Some arg -> raise (Stop (Wrong (s, arg, "no argument")))
+                let getArg () =
+                    match follow with
+                    | None ->
+                        if !current + 1 < (Array.length !argv) then (!argv).[!current + 1]
+                        else raise (Stop (Missing s))
+                    | Some arg -> arg
+                (* 
+                    follow matches (Some arg) when options and arguments are seperated by an '='
+                    otherwise, it's in the form -option arg in which case we advance the pointer
+                    current by one to consume -option, then current will point to arg, which will
+                    also be incremented at the end of the iteration.
+                *)
+                let consumeArg () =
+                    match follow with
+                    | None   -> incr current 
+                    | Some _ -> () 
+                let rec handleAction = function 
+                    | Unit f -> noArg (); f ()
+                    | Bool f -> 
+                        let arg = getArg ()
+                        match boolOpt arg with 
+                        | None -> raise (Stop (Wrong (s, arg, "a boolean")))
+                        | Some s -> f s
+                        consumeArg ()
+                    | Set r -> noArg (); r := true
+                    | Clear r -> noArg (); r := false
+                    | String f -> 
+                        let arg = getArg ()
+                        f arg
+                        consumeArg ()
+                    | Symbol (symb, f) -> 
+                        let arg = getArg ()
+                        // symb is a list of possible values for this '-option'
+                        // arg is a potential value  
+                        if List.contains arg symb then
+                            f arg
+                            consumeArg ()
+                        else raise (Stop (Wrong (s, arg, "one of: " + (makeSymlist "" " " "" symb))))
+                    | SetString r -> 
+                        r := getArg ()
+                        consumeArg ()
+                    | Int f ->
+                        let arg = getArg ()
+                        match intOpt arg with
+                        | None -> raise (Stop (Wrong (s, arg, "an integer")))
+                        | Some x -> f x
+                        consumeArg ()
+                    | SetInt r -> 
+                        let arg = getArg ()
+                        match intOpt arg with
+                        | None -> raise (Stop (Wrong (s, arg, "an integer")))
+                        | Some x -> r := x
+                    | Float f ->
+                        let arg = getArg ()
+                        match floatOpt arg with
+                        | None -> raise (Stop (Wrong (s, arg, "a float")))
+                        | Some x -> f x
+                        consumeArg ()
+                    | SetFloat r -> 
+                        let arg = getArg () 
+                        match floatOpt arg with
+                        | None -> raise (Stop (Wrong (s, arg, "a float")))
+                        | Some x -> r := x
+                    | Tuple specs -> // ?
+                        noArg ()
+                        List.iter handleAction specs
+                    | Rest f ->
+                        noArg () // f will never be called on an empty list. Subtle difference between Rest and RestAll
+                        while !current < (Array.length !argv) - 1 do
+                          f (!argv).[!current + 1]
+                          consumeArg ()
+                    | RestAll f ->
+                        noArg ()
+                        let acc = ref [] // for RestAll f can be called on an empty list 
+                        while !current < Array.length !argv - 1 do
+                          acc := (!argv).[!current + 1] :: !acc
+                          consumeArg ()
+                        f (List.rev !acc)
+                    | Expand f -> // who needs this anyway?
+                        if not expand then // remember 'expand?'
+                          raise (InvalidArgument "Arg.Expand is is only allowed with \
+                                                   Arg.parse_and_expand_argv_dynamic")
+                        let arg = getArg () 
+                        let newarg = f arg 
+                        consumeArg ()
+                        let before = Array.sub !argv 0 (!current + 1)
+                        let after = Array.sub !argv (!current + 1) ((Array.length !argv) - !current - 1) 
+                        argv := Array.concat [before; newarg; after]
+
+                handleAction action  
+            else anonfun s
+        with Bad m -> raise (convertError (Message m)) | Stop e -> raise (convertError e)
+        incr current // advance 
